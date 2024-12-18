@@ -1,7 +1,7 @@
 const express = require("express");
 const cors = require("cors");
 const dotenv = require("dotenv");
-const { OpenAI } = require("openai");
+const { GoogleGenerativeAI } = require("@google/generative-ai");
 const Pusher = require("pusher");
 const DateTimePatterns = require("./utils/DateTimePatterns");
 const DateTimeResolver = require("./utils/DateTimeResolver");
@@ -9,7 +9,6 @@ const FeedbackProcessor = require("./utils/FeedbackProcessor");
 const TaskParsingLog = require("./models/TaskParsingLog");
 const sequelize = require("./config/database");
 const { Sequelize } = require("sequelize");
-const { encoding_for_model } = require("tiktoken");
 const { SYSTEM_MESSAGE } = require("./llm/system-messages");
 const { taskFunctions } = require("./llm/functions");
 const {
@@ -30,51 +29,50 @@ const pusher = new Pusher({
   useTLS: true,
 });
 
-// Initialize OpenAI
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
+// Initialize Gemini
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const model = genAI.getGenerativeModel({
+  model: "gemini-1.5-flash",
+  tools: {
+    functionDeclarations: taskFunctions,
+  },
+  generationConfig: {
+    temperature: 0.7,
+    topK: 40,
+    topP: 0.95,
+    maxOutputTokens: 1024,
+  },
 });
-
-// Initialize token encoder
-const tokenEncoder = encoding_for_model("gpt-4o-2024-08-06");
 
 // Store notifications in memory
 let notifications = [];
 
-// Token management functions
-function countTokens(text) {
-  return tokenEncoder.encode(text).length;
-}
-
-function truncateToTokenLimit(text, limit = 500) {
-  const tokens = tokenEncoder.encode(text);
-  if (tokens.length <= limit) return text;
-  return tokenEncoder.decode(tokens.slice(0, limit));
-}
-
-// OpenAI API error handler
-async function handleOpenAIRequest(requestFn) {
+// Gemini API error handler
+async function handleGeminiRequest(requestFn) {
   try {
     return await requestFn();
   } catch (error) {
     if (error.response) {
-      console.error("OpenAI API Error:", {
+      console.error("Gemini API Error:", {
         status: error.response.status,
         data: error.response.data,
       });
-
-      if (error.response.status === 429) {
-        throw new Error("Rate limit exceeded. Please try again later.");
-      }
-
-      if (error.response.status === 400) {
-        throw new Error("Invalid request. Please check your input.");
-      }
-
-      throw new Error("OpenAI API error: " + error.response.data.error.message);
     } else {
-      console.error("OpenAI Request Error:", error);
-      throw new Error("Failed to process your request. Please try again.");
+      console.error("Gemini API Error:", error);
+    }
+
+    if (error.status === 429) {
+      throw new Error("Rate limit exceeded. Please try again later.");
+    }
+
+    if (error.status === 400) {
+      throw new Error("Invalid request. Please check your input.");
+    }
+
+    if (error.response?.data?.error?.message) {
+      throw new Error("Gemini API error: " + error.response.data.error.message);
+    } else {
+      throw new Error("Gemini API error: " + error.message);
     }
   }
 }
@@ -171,47 +169,36 @@ app.post("/api/parse-task", async (req, res) => {
       });
     }
 
-    // Create LLM prompt
-    const prompt = {
-      model: "gpt-4o-2024-08-06",
-      messages: [
-        {
-          role: "system",
-          content: SYSTEM_MESSAGE,
-        },
-        {
-          role: "user",
-          content: `Create a task from: ${userInput}`,
-        },
-      ],
-      tools: taskFunctions.map((fn) => ({
-        type: "function",
-        function: {
-          name: fn.name,
-          description: fn.description,
-          parameters: fn.parameters,
-        },
-      })),
-      tool_choice: { type: "function", function: { name: "create_task" } },
-    };
-
-    // Get LLM response
-    console.log("Getting LLM response...");
+    // Create Gemini prompt
+    console.log("Getting Gemini response...");
     const llmStartTime = Date.now();
-    const completion = await openai.chat.completions.create(prompt);
+
+    const result = await model.generateContent({
+      contents: [
+        { role: "user", parts: [{ text: SYSTEM_MESSAGE }] },
+        { role: "user", parts: [{ text: `Create a task from: ${userInput}` }] },
+      ],
+      tools: taskFunctions,
+      generationConfig: {
+        temperature: 0.7,
+        topK: 40,
+        topP: 0.95,
+        maxOutputTokens: 1024,
+      },
+    });
+
     llmLatency = Date.now() - llmStartTime;
+    const response = result.response;
+    console.log("Gemini Response:", response);
 
-    const response = completion.choices[0];
-    console.log("LLM Response:", response);
-
-    if (!response.message.tool_calls) {
-      throw new Error("No function call in LLM response");
+    if (!response.candidates?.[0]?.content?.parts?.[0]?.functionCall) {
+      throw new Error("No function call in Gemini response");
     }
 
     // Process function call
-    const toolCall = response.message.tool_calls[0];
-    const functionName = toolCall.function.name;
-    const functionArgs = JSON.parse(toolCall.function.arguments);
+    const functionCall = response.candidates[0].content.parts[0].functionCall;
+    const functionName = functionCall.name;
+    const functionArgs = functionCall.args;
 
     let taskResult;
     if (functionName === "create_task") {
@@ -251,10 +238,27 @@ app.post("/api/parse-task", async (req, res) => {
       success: false,
       error: error.message,
       feedback: {
-        voice: "Sorry, I had trouble with that. Could you try again?",
+        voice:
+          "I encountered an error while creating your task. Please try again.",
         display: "Error creating task",
       },
     });
+  } finally {
+    // Log parsing attempt
+    const endTime = Date.now();
+    const totalLatency = endTime - startTime;
+
+    try {
+      await TaskParsingLog.create({
+        input: req.body.userInput,
+        success: !error,
+        llm_latency: llmLatency,
+        total_latency: totalLatency,
+        error_message: error ? error.message : null,
+      });
+    } catch (logError) {
+      console.error("Failed to log parsing attempt:", logError);
+    }
   }
 });
 
