@@ -1,6 +1,11 @@
 const { DataTypes, Model } = require("sequelize");
 const crypto = require("crypto");
 const sequelize = require("../config/database");
+const {
+  TASK_PARSING_LOG_FIELDS: FIELDS,
+  METRICS_FIELDS,
+  METADATA_FIELDS,
+} = require("./constants");
 
 // Function to anonymize sensitive data
 function anonymizeText(text) {
@@ -30,13 +35,13 @@ class TaskParsingLog extends Model {
     return await sequelize.query(
       `
             SELECT 
-                parsing_success as success,
+                ${FIELDS.PARSING_SUCCESS} as success,
                 COUNT(*) as count,
-                AVG(CAST(parsed_output->>'confidence' AS FLOAT)) as avg_confidence,
-                AVG(CAST(metrics->>'processing_time_ms' AS FLOAT)) as avg_processing_time
+                AVG(CAST(${FIELDS.PARSED_OUTPUT}->>'confidence' AS FLOAT)) as avg_confidence,
+                AVG(CAST(${FIELDS.METRICS}->>'${METRICS_FIELDS.PROCESSING_TIME_MS}' AS FLOAT)) as avg_processing_time
             FROM task_parsing_logs
             WHERE timestamp >= :cutoff
-            GROUP BY parsing_success
+            GROUP BY ${FIELDS.PARSING_SUCCESS}
         `,
       {
         replacements: { cutoff },
@@ -47,27 +52,24 @@ class TaskParsingLog extends Model {
 
   getSafeData() {
     const data = this.toJSON();
-    delete data.input_hash;
+    delete data[FIELDS.INPUT_HASH];
     return data;
   }
 }
 
 TaskParsingLog.init(
   {
-    // Hash the original input for privacy but maintain traceability
-    input_hash: {
+    [FIELDS.INPUT_HASH]: {
       type: DataTypes.STRING,
       allowNull: false,
     },
 
-    // Store anonymized version of the input
-    anonymized_input: {
+    [FIELDS.ANONYMIZED_INPUT]: {
       type: DataTypes.TEXT,
       allowNull: false,
     },
 
-    // Parsing results
-    parsed_output: {
+    [FIELDS.PARSED_OUTPUT]: {
       type: DataTypes.JSONB,
       allowNull: false,
       defaultValue: {},
@@ -82,36 +84,28 @@ TaskParsingLog.init(
       },
     },
 
-    // Metadata
     timestamp: {
       type: DataTypes.DATE,
       allowNull: false,
       defaultValue: DataTypes.NOW,
     },
 
-    // Success metrics
-    parsing_success: {
+    [FIELDS.PARSING_SUCCESS]: {
       type: DataTypes.BOOLEAN,
       allowNull: false,
     },
 
-    // Error tracking
     errors: {
       type: DataTypes.JSONB,
       defaultValue: null,
     },
 
-    // Performance metrics
-    metrics: {
+    [FIELDS.METRICS]: {
       type: DataTypes.JSONB,
       defaultValue: {},
       validate: {
         hasRequiredMetrics(value) {
-          const required = [
-            "processing_time_ms",
-            "llm_latency_ms",
-            "pattern_match_confidence",
-          ];
+          const required = Object.values(METRICS_FIELDS);
           const missing = required.filter((field) => !(field in value));
           if (missing.length > 0) {
             throw new Error(`Missing required metrics: ${missing.join(", ")}`);
@@ -120,20 +114,21 @@ TaskParsingLog.init(
       },
     },
 
-    // Feature flags and versions
-    metadata: {
+    [FIELDS.METADATA]: {
       type: DataTypes.JSONB,
       defaultValue: {},
       validate: {
         hasRequiredMetadata(value) {
-          const required = ["llm_model", "prompt_version", "pattern_version"];
-          const validModels = ["gpt-4o-mini", "gpt-3.5-turbo", "gpt-4-turbo"];
+          const required = Object.values(METADATA_FIELDS);
+          const validModels = ["gemini-1.5-flash"];
           const missing = required.filter((field) => !(field in value));
           if (missing.length > 0) {
             throw new Error(`Missing required metadata: ${missing.join(", ")}`);
           }
-          if (!validModels.includes(value.llm_model)) {
-            throw new Error(`Invalid LLM model: ${value.llm_model}`);
+          if (!validModels.includes(value[METADATA_FIELDS.LLM_MODEL])) {
+            throw new Error(
+              `Invalid LLM model: ${value[METADATA_FIELDS.LLM_MODEL]}`
+            );
           }
         },
       },
@@ -146,27 +141,27 @@ TaskParsingLog.init(
     underscored: true,
     hooks: {
       beforeValidate: async (instance) => {
-        // Create a hash of the original input
-        if (instance.anonymized_input) {
-          instance.input_hash = crypto
+        if (instance[FIELDS.ANONYMIZED_INPUT]) {
+          instance[FIELDS.INPUT_HASH] = crypto
             .createHash("sha256")
-            .update(instance.anonymized_input)
+            .update(instance[FIELDS.ANONYMIZED_INPUT])
             .digest("hex");
 
-          // Anonymize the input after creating hash
-          instance.anonymized_input = anonymizeText(instance.anonymized_input);
+          instance[FIELDS.ANONYMIZED_INPUT] = anonymizeText(
+            instance[FIELDS.ANONYMIZED_INPUT]
+          );
         }
       },
     },
     indexes: [
       {
-        fields: ["input_hash"],
+        fields: [FIELDS.INPUT_HASH],
       },
       {
         fields: ["timestamp"],
       },
       {
-        fields: ["parsing_success"],
+        fields: [FIELDS.PARSING_SUCCESS],
       },
     ],
   }

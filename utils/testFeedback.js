@@ -3,6 +3,11 @@ const FeedbackProcessor = require("./FeedbackProcessor");
 const DateTimeResolver = require("./DateTimeResolver");
 const { OpenAI } = require("openai");
 const crypto = require("crypto");
+const {
+  TASK_PARSING_LOG_FIELDS: FIELDS,
+  METRICS_FIELDS,
+  METADATA_FIELDS,
+} = require("../models/constants");
 require("dotenv").config();
 
 // Initialize OpenAI
@@ -215,25 +220,25 @@ const generateSampleData = async () => {
       const result = await processTask(input);
 
       const taskData = {
-        input_hash: generateHash(input),
-        anonymized_input: input,
-        parsed_output: result.parsed_output || {
+        [FIELDS.INPUT_HASH]: generateHash(input),
+        [FIELDS.ANONYMIZED_INPUT]: input,
+        [FIELDS.PARSED_OUTPUT]: result.parsed_output || {
           task: { title: null, description: null, priority: "medium" },
           temporal: { error: result.error },
         },
-        parsing_success: result.success,
+        [FIELDS.PARSING_SUCCESS]: result.success,
         errors: !result.success
           ? { message: result.error, type: "ParseError" }
           : null,
-        metrics: {
-          processing_time_ms: result.processing_time,
-          llm_latency_ms: result.llm_latency,
-          pattern_match_confidence: result.success ? 0.9 : 0.3,
+        [FIELDS.METRICS]: {
+          [METRICS_FIELDS.PROCESSING_TIME_MS]: result.processing_time,
+          [METRICS_FIELDS.LLM_LATENCY_MS]: result.llm_latency,
+          [METRICS_FIELDS.PATTERN_MATCH_CONFIDENCE]: result.success ? 0.9 : 0.3,
         },
-        metadata: {
-          llm_model: "gpt-4o-mini",
-          prompt_version: "1.0",
-          pattern_version: "1.0",
+        [FIELDS.METADATA]: {
+          [METADATA_FIELDS.LLM_MODEL]: "gemini-1.5-flash ",
+          [METADATA_FIELDS.PROMPT_VERSION]: "1.0",
+          [METADATA_FIELDS.PATTERN_VERSION]: "1.0",
         },
       };
 

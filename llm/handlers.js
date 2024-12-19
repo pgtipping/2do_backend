@@ -23,7 +23,18 @@ async function handleCreateTask(params) {
 
     return {
       success: true,
-      task: task,
+      task: {
+        ...task.toJSON(),
+        priority: {
+          level: task.priority,
+          reasoning: task.priority_reasoning,
+        },
+        temporal: {
+          due_date: task.due_date,
+          start_date: task.start_date,
+          recurrence: task.recurrence,
+        },
+      },
       message: "Task created successfully",
     };
   } catch (error) {

@@ -1,0 +1,39 @@
+{
+  "development": {
+    "username": "${POSTGRES_USER}",
+    "password": "${POSTGRES_PASSWORD}",
+    "database": "${POSTGRES_DB}",
+    "host": "${POSTGRES_HOST}",
+    "port": "${POSTGRES_PORT}",
+    "dialect": "postgres",
+    "dialectOptions": {
+      "ssl": false
+    }
+  },
+  "test": {
+    "username": "${POSTGRES_USER}",
+    "password": "${POSTGRES_PASSWORD}",
+    "database": "${POSTGRES_DB}_test",
+    "host": "${POSTGRES_HOST}",
+    "port": "${POSTGRES_PORT}",
+    "dialect": "postgres",
+    "dialectOptions": {
+      "ssl": false
+    }
+  },
+  "production": {
+    "username": "${POSTGRES_USER}",
+    "password": "${POSTGRES_PASSWORD}",
+    "database": "${POSTGRES_DB}_prod",
+    "host": "${POSTGRES_HOST}",
+    "port": "${POSTGRES_PORT}",
+    "dialect": "postgres",
+    "dialectOptions": {
+      "ssl": {
+        "require": true,
+        "rejectUnauthorized": false
+      }
+    },
+    "logging": false
+  }
+}

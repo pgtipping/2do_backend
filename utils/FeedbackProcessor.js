@@ -1,5 +1,10 @@
 const TaskParsingLog = require("../models/TaskParsingLog");
 const { Op } = require("sequelize");
+const {
+  TASK_PARSING_LOG_FIELDS: FIELDS,
+  METRICS_FIELDS,
+  METADATA_FIELDS,
+} = require("../models/constants");
 
 class FeedbackProcessor {
   constructor() {
@@ -23,12 +28,14 @@ class FeedbackProcessor {
 
       // Calculate success and error rates
       const totalLogs = logs.length;
-      const successfulLogs = logs.filter((log) => log.parsing_success).length;
+      const successfulLogs = logs.filter(
+        (log) => log[FIELDS.PARSING_SUCCESS]
+      ).length;
       const successRate = totalLogs > 0 ? successfulLogs / totalLogs : 0;
       const errorRate = 1 - successRate;
 
       // Get failed logs for detailed analysis
-      const failedLogs = logs.filter((log) => !log.parsing_success);
+      const failedLogs = logs.filter((log) => !log[FIELDS.PARSING_SUCCESS]);
 
       // Analyze error patterns
       const errorPatterns = this.analyzeErrorPatterns(failedLogs);
@@ -62,9 +69,11 @@ class FeedbackProcessor {
       // Calculate average confidence for successful tasks
       const avgConfidence =
         logs
-          .filter((log) => log.parsing_success)
-          .reduce((sum, log) => sum + (log.parsed_output?.confidence || 0), 0) /
-          successfulLogs || 0;
+          .filter((log) => log[FIELDS.PARSING_SUCCESS])
+          .reduce(
+            (sum, log) => sum + (log[FIELDS.PARSED_OUTPUT]?.confidence || 0),
+            0
+          ) / successfulLogs || 0;
 
       // Return comprehensive analysis
       return {
@@ -105,11 +114,11 @@ class FeedbackProcessor {
 
       patterns[errorType].count++;
       patterns[errorType].avgProcessingTime +=
-        logData.metrics?.processing_time_ms || 0;
+        logData[FIELDS.METRICS]?.[METRICS_FIELDS.PROCESSING_TIME_MS] || 0;
 
       // Keep a few anonymized examples
       if (patterns[errorType].examples.length < 3) {
-        patterns[errorType].examples.push(logData.anonymized_input);
+        patterns[errorType].examples.push(logData[FIELDS.ANONYMIZED_INPUT]);
       }
     });
 
