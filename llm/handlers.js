@@ -1,5 +1,11 @@
 const Task = require("../models/Task");
 const { broadcastNotification } = require("../utils/notifications");
+const {
+  findRelatedTasks,
+  getCategoryDistribution,
+  getCommonTaskTimes,
+  getPreferredDays,
+} = require("../utils/taskPatternAnalysis");
 
 async function handleCreateTask(params) {
   try {
@@ -13,6 +19,7 @@ async function handleCreateTask(params) {
       recurrence: params.temporal?.recurrence,
       tags: params.tags || [],
       dependencies: params.dependencies || [],
+      reminder: params.temporal?.reminder,
     });
 
     broadcastNotification("TASK_CREATED", {
@@ -24,140 +31,210 @@ async function handleCreateTask(params) {
     return {
       success: true,
       task: {
-        ...task.toJSON(),
-        priority: {
-          level: task.priority,
-          reasoning: task.priority_reasoning,
-        },
-        temporal: {
-          due_date: task.due_date,
-          start_date: task.start_date,
-          recurrence: task.recurrence,
-        },
+        id: task.id,
+        title: task.title,
+        description: task.description,
+        priority: task.priority,
+        priority_reasoning: task.priority_reasoning,
+        due_date: task.due_date,
+        start_date: task.start_date,
+        recurrence: task.recurrence,
+        tags: task.tags,
+        dependencies: task.dependencies,
+        reminder: task.reminder,
       },
-      message: "Task created successfully",
     };
   } catch (error) {
     console.error("Error creating task:", error);
-    return {
-      success: false,
-      error: error.message,
-    };
+    return { success: false, error: error.message };
   }
 }
 
 async function handleUpdateTask(params) {
   try {
-    const task = await Task.findByPk(params.task_id);
+    const task = await Task.findByPk(params.id);
     if (!task) {
-      return {
-        success: false,
-        error: "Task not found",
-      };
+      return { success: false, error: "Task not found" };
     }
 
-    await task.update(params.updates);
+    await task.update({
+      title: params.title,
+      description: params.description || "",
+      priority: params.priority.level,
+      priority_reasoning: params.priority.reasoning,
+      due_date: params.temporal?.due_date,
+      start_date: params.temporal?.start_date,
+      recurrence: params.temporal?.recurrence,
+      tags: params.tags || [],
+      dependencies: params.dependencies || [],
+      reminder: params.temporal?.reminder,
+    });
 
     broadcastNotification("TASK_UPDATED", {
       taskId: task.id,
       message: `Task updated: ${task.title}`,
-      reason: params.reason,
       priority: task.priority,
     });
 
     return {
       success: true,
-      task: task,
-      message: "Task updated successfully",
+      task: {
+        id: task.id,
+        title: task.title,
+        description: task.description,
+        priority: task.priority,
+        priority_reasoning: task.priority_reasoning,
+        due_date: task.due_date,
+        start_date: task.start_date,
+        recurrence: task.recurrence,
+        tags: task.tags,
+        dependencies: task.dependencies,
+        reminder: task.reminder,
+      },
     };
   } catch (error) {
     console.error("Error updating task:", error);
-    return {
-      success: false,
-      error: error.message,
-    };
+    return { success: false, error: error.message };
   }
 }
 
 async function handleAnalyzeTaskContext(params) {
-  try {
-    const task = await Task.findByPk(params.task_id, {
-      include: ["dependencies", "related_tasks"],
-    });
+  const { input, tasks = [], currentView = "all" } = params;
 
-    if (!task) {
-      return {
-        success: false,
-        error: "Task not found",
-      };
-    }
+  // Find related tasks based on semantic similarity
+  const relatedTasks = findRelatedTasks(tasks, input);
 
-    let analysis = {};
-    switch (params.analysis_type) {
-      case "priority":
-        analysis = await analyzePriority(task);
-        break;
-      case "scheduling":
-        analysis = await analyzeScheduling(task);
-        break;
-      case "dependencies":
-        analysis = await analyzeDependencies(task);
-        break;
-      case "effort":
-        analysis = await analyzeEffort(task);
-        break;
-      default:
-        return {
-          success: false,
-          error: "Invalid analysis type",
-        };
-    }
+  // Get category distribution to suggest categories
+  const categoryDistribution = getCategoryDistribution(tasks);
+  const suggestedCategories = categoryDistribution
+    .slice(0, 3)
+    .map((c) => c.category);
 
-    return {
-      success: true,
-      analysis: analysis,
-    };
-  } catch (error) {
-    console.error("Error analyzing task:", error);
-    return {
-      success: false,
-      error: error.message,
-    };
+  // Check for potential scheduling conflicts
+  const potentialConflicts = tasks
+    .filter((task) => {
+      if (!task.dueDate) return false;
+      const taskDate = new Date(task.dueDate);
+      const inputDate = new Date(params.dueDate || Date.now());
+      // Check if tasks are on the same day and within 2 hours of each other
+      return (
+        taskDate.toDateString() === inputDate.toDateString() &&
+        Math.abs(taskDate.getTime() - inputDate.getTime()) <= 2 * 60 * 60 * 1000
+      );
+    })
+    .map((task) => ({
+      taskId: task.id,
+      title: task.title,
+      dueDate: task.dueDate,
+      conflictType: "scheduling",
+    }));
+
+  // Suggest priority based on various factors
+  let suggestedPriority = "medium";
+  const keywords = {
+    high: ["urgent", "asap", "important", "critical", "deadline"],
+    low: ["whenever", "someday", "optional", "if possible"],
+  };
+
+  const inputLower = input.toLowerCase();
+  if (keywords.high.some((word) => inputLower.includes(word))) {
+    suggestedPriority = "high";
+  } else if (keywords.low.some((word) => inputLower.includes(word))) {
+    suggestedPriority = "low";
   }
-}
 
-// Analysis helper functions
-async function analyzePriority(task) {
-  // Implement priority analysis logic
+  // Get common task times for scheduling suggestions
+  const commonTimes = getCommonTaskTimes(tasks);
+  const preferredDays = getPreferredDays(tasks);
+
   return {
-    current_priority: task.priority,
-    reasoning: task.priority_reasoning,
-    suggested_changes: null,
-    factors_considered: ["due_date", "dependencies", "current_progress"],
+    related_tasks: relatedTasks.map((task) => ({
+      id: task.id,
+      title: task.title,
+      similarity: task.similarity || "medium",
+    })),
+    suggested_categories: suggestedCategories,
+    potential_conflicts,
+    suggested_priority,
+    scheduling_insights: {
+      common_times: commonTimes,
+      preferred_days: preferredDays,
+    },
   };
 }
 
-async function analyzeScheduling(task) {
-  // Implement scheduling analysis logic
-  return {
-    optimal_start_date: task.start_date,
-    optimal_due_date: task.due_date,
-    conflicts: [],
-    scheduling_factors: [
-      "dependencies",
-      "team_availability",
-      "project_timeline",
-    ],
-  };
-}
+async function analyzeDependencies(task, allTasks = []) {
+  // Get direct dependencies
+  const directDependencies = allTasks.filter((t) =>
+    task.dependencies?.includes(t.id)
+  );
 
-async function analyzeDependencies(task) {
-  // Implement dependency analysis logic
+  // Find indirect dependencies (dependencies of dependencies)
+  const indirectDependencies = new Set();
+  const visited = new Set();
+
+  function findIndirectDeps(taskId) {
+    if (visited.has(taskId)) return;
+    visited.add(taskId);
+
+    const task = allTasks.find((t) => t.id === taskId);
+    if (!task?.dependencies) return;
+
+    task.dependencies.forEach((depId) => {
+      indirectDependencies.add(depId);
+      findIndirectDeps(depId);
+    });
+  }
+
+  task.dependencies?.forEach((depId) => findIndirectDeps(depId));
+
+  // Find potential blockers (incomplete dependencies)
+  const potentialBlockers = directDependencies
+    .filter((dep) => !dep.completed)
+    .map((dep) => ({
+      taskId: dep.id,
+      title: dep.title,
+      dueDate: dep.dueDate,
+      reason: "Dependency not completed",
+    }));
+
+  // Suggest tasks that could be done in parallel
+  // (tasks with similar categories but no dependency relationship)
+  const suggestedParallel = allTasks
+    .filter((t) => {
+      if (t.id === task.id) return false;
+      if (task.dependencies?.includes(t.id)) return false;
+      if (t.dependencies?.includes(task.id)) return false;
+      if (t.completed) return false;
+
+      // Check for category overlap
+      const taskCategories = new Set(task.categories || []);
+      return (t.categories || []).some((cat) => taskCategories.has(cat));
+    })
+    .map((t) => ({
+      taskId: t.id,
+      title: t.title,
+      categories: t.categories,
+      reason: "Similar category, no dependencies",
+    }))
+    .slice(0, 3); // Limit to top 3 suggestions
+
   return {
-    direct_dependencies: task.dependencies,
-    indirect_dependencies: [],
-    potential_blockers: [],
-    suggested_parallel_tasks: [],
+    direct_dependencies: directDependencies.map((dep) => ({
+      taskId: dep.id,
+      title: dep.title,
+      completed: dep.completed,
+    })),
+    indirect_dependencies: Array.from(indirectDependencies).map((depId) => {
+      const dep = allTasks.find((t) => t.id === depId);
+      return {
+        taskId: depId,
+        title: dep?.title,
+        completed: dep?.completed,
+      };
+    }),
+    potential_blockers: potentialBlockers,
+    suggested_parallel_tasks: suggestedParallel,
   };
 }
 

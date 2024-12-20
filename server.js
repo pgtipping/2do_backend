@@ -151,14 +151,14 @@ function broadcastNotification(type, data) {
 
 // Add task parsing endpoint
 app.post("/api/parse-task", async (req, res) => {
-  console.log("=== Task Parsing Started ===");
+  console.log("=== Task Processing Started ===");
   const startTime = Date.now();
   let llmLatency = 0;
   let error = null;
   let parsedResponse = null;
 
   try {
-    const { userInput, requestSource = "text" } = req.body;
+    const { userInput, sessionContext = {} } = req.body;
 
     // Validate input
     if (!userInput || typeof userInput !== "string") {
@@ -167,8 +167,9 @@ app.post("/api/parse-task", async (req, res) => {
         success: false,
         error: "Invalid input text",
         feedback: {
-          voice: "I need some text to create a task. Could you try again?",
-          display: "Please provide task text",
+          voice:
+            "I need some text to process your request. Could you try again?",
+          display: "Please provide input text",
         },
       });
     }
@@ -186,52 +187,70 @@ app.post("/api/parse-task", async (req, res) => {
       ],
     });
 
-    const result = await chat.sendMessage(`Create a task from: ${userInput}`, {
-      tools: [taskFunctions],
+    const result = await chat.sendMessage(userInput, {
+      tools: taskFunctions,
+      toolChoice: "auto", // Let the LLM choose the appropriate function
     });
 
     llmLatency = Date.now() - llmStartTime;
     console.log("Gemini Response:", JSON.stringify(result, null, 2));
 
-    // Extract the JSON from the text response
-    const responseText = result.response.candidates[0].content.parts[0].text;
-    // Remove markdown code block markers and parse JSON
-    const jsonStr = responseText.replace(/```json\n|\n```/g, "");
-    parsedResponse = JSON.parse(jsonStr);
-
-    console.log("Parsed response:", JSON.stringify(parsedResponse, null, 2));
-
-    if (!parsedResponse.task) {
-      throw new Error("No task data in response");
+    const candidate = result.response.candidates[0];
+    if (!candidate.content.parts[0].functionCall) {
+      throw new Error("Expected function call in response");
     }
 
-    // Process task data
-    const taskResult = await handleCreateTask(parsedResponse.task);
+    const functionCall = candidate.content.parts[0].functionCall;
+    console.log(`LLM chose function: ${functionCall.name}`);
 
-    // Broadcast notification
-    broadcastNotification("TASK_CREATED", {
-      message: `New task created: ${taskResult.task.title}`,
-      taskId: taskResult.task.id,
-      task: taskResult.task,
-    });
+    // Process based on the chosen function
+    let taskResult;
+    switch (functionCall.name) {
+      case "create_task":
+        taskResult = await handleCreateTask(functionCall.args);
+        break;
+      case "identify_task":
+        taskResult = await handleIdentifyTask({
+          ...functionCall.args,
+          context: { ...functionCall.args.context, ...sessionContext },
+        });
+        break;
+      case "update_task":
+        taskResult = await handleUpdateTask(functionCall.args);
+        break;
+      default:
+        throw new Error(`Unknown function: ${functionCall.name}`);
+    }
 
-    // Send successful response
-    res.json({
+    // Send appropriate response based on the function called
+    const response = {
       success: true,
-      task: taskResult.task,
+      function_called: functionCall.name,
+      result: taskResult,
       feedback: {
-        voice: `I've created a task: ${taskResult.task.title}`,
-        display: "Task created successfully",
+        voice: getFeedbackMessage(functionCall.name, taskResult),
+        display: getDisplayMessage(functionCall.name, taskResult),
       },
-      analysis: parsedResponse.analysis || {
-        completeness: 1.0,
-        missing_info: [],
-        suggestions: [],
-      },
-    });
+    };
+
+    // Broadcast notification if needed
+    if (["create_task", "update_task"].includes(functionCall.name)) {
+      broadcastNotification(
+        `TASK_${functionCall.name === "create_task" ? "CREATED" : "UPDATED"}`,
+        {
+          taskId: taskResult.task.id,
+          message: `Task ${
+            functionCall.name === "create_task" ? "created" : "updated"
+          }: ${taskResult.task.title}`,
+          task: taskResult.task,
+        }
+      );
+    }
+
+    res.json(response);
   } catch (err) {
     error = err;
-    console.error("=== Task Parsing Failed ===");
+    console.error("=== Task Processing Failed ===");
     console.error("Error details:", err);
 
     res.status(500).json({
@@ -239,12 +258,12 @@ app.post("/api/parse-task", async (req, res) => {
       error: err.message,
       feedback: {
         voice:
-          "I encountered an error while creating your task. Please try again.",
-        display: "Error creating task",
+          "I encountered an error processing your request. Please try again.",
+        display: "Error processing request",
       },
     });
   } finally {
-    // Log parsing attempt with all required fields
+    // Log processing attempt
     const endTime = Date.now();
     const totalLatency = endTime - startTime;
 
@@ -263,8 +282,9 @@ app.post("/api/parse-task", async (req, res) => {
         [FIELDS.PARSED_OUTPUT]: error
           ? {}
           : {
-              task: parsedResponse.task,
-              temporal: parsedResponse.task.temporal,
+              function_called: parsedResponse?.functionCall?.name,
+              args: parsedResponse?.functionCall?.args,
+              result: parsedResponse?.result,
             },
         [FIELDS.METRICS]: {
           [METRICS_FIELDS.PROCESSING_TIME_MS]: totalLatency,
@@ -278,10 +298,39 @@ app.post("/api/parse-task", async (req, res) => {
         },
       });
     } catch (logError) {
-      console.error("Failed to log parsing attempt:", logError);
+      console.error("Failed to log processing attempt:", logError);
     }
   }
 });
+
+// Helper functions for feedback messages
+function getFeedbackMessage(functionName, result) {
+  switch (functionName) {
+    case "create_task":
+      return `I've created a task: ${result.task.title}`;
+    case "identify_task":
+      return result.success
+        ? `I found the task: ${result.task.title}`
+        : "I couldn't find that task. Could you be more specific?";
+    case "update_task":
+      return `I've updated the task: ${result.task.title}`;
+    default:
+      return "Request processed successfully";
+  }
+}
+
+function getDisplayMessage(functionName, result) {
+  switch (functionName) {
+    case "create_task":
+      return "Task created successfully";
+    case "identify_task":
+      return result.success ? "Task found" : "Task not found";
+    case "update_task":
+      return "Task updated successfully";
+    default:
+      return "Request processed";
+  }
+}
 
 // Add notifications endpoints
 app.get("/api/notifications", (req, res) => {
