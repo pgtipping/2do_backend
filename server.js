@@ -21,6 +21,7 @@ const {
   handleUpdateTask,
   handleAnalyzeTaskContext,
 } = require("./llm/handlers");
+const Task = require("./models/Task");
 
 // Load environment variables
 dotenv.config();
@@ -381,6 +382,55 @@ app.post("/api/notifications/clear", (req, res) => {
 // Add health check endpoint
 app.get("/health", (req, res) => {
   res.json({ status: "ok" });
+});
+
+// Add task CRUD endpoints
+app.get("/api/tasks", async (req, res) => {
+  try {
+    const tasks = await Task.findAll();
+    res.json(tasks);
+  } catch (error) {
+    console.error("Error fetching tasks:", error);
+    res.status(500).json({ error: "Failed to fetch tasks" });
+  }
+});
+
+app.post("/api/tasks", async (req, res) => {
+  try {
+    const task = await Task.create(req.body);
+    res.status(201).json(task);
+  } catch (error) {
+    console.error("Error creating task:", error);
+    res.status(500).json({ error: "Failed to create task" });
+  }
+});
+
+app.put("/api/tasks/:id", async (req, res) => {
+  try {
+    const task = await Task.findByPk(req.params.id);
+    if (!task) {
+      return res.status(404).json({ error: "Task not found" });
+    }
+    await task.update(req.body);
+    res.json(task);
+  } catch (error) {
+    console.error("Error updating task:", error);
+    res.status(500).json({ error: "Failed to update task" });
+  }
+});
+
+app.delete("/api/tasks/:id", async (req, res) => {
+  try {
+    const task = await Task.findByPk(req.params.id);
+    if (!task) {
+      return res.status(404).json({ error: "Task not found" });
+    }
+    await task.destroy();
+    res.json({ message: "Task deleted successfully" });
+  } catch (error) {
+    console.error("Error deleting task:", error);
+    res.status(500).json({ error: "Failed to delete task" });
+  }
 });
 
 // Start the server
