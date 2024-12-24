@@ -9,17 +9,25 @@ const {
 
 async function handleCreateTask(params) {
   try {
+    // Extract temporal data from nested structure if present
+    const temporalData = params.temporal || {
+      due_date: params.due_date,
+      start_date: params.start_date,
+      recurrence: params.recurrence,
+      reminder: params.reminder,
+    };
+
     const task = await Task.create({
       title: params.title,
       description: params.description || "",
       priority: params.priority.level,
       priority_reasoning: params.priority.reasoning,
-      due_date: params.temporal?.due_date,
-      start_date: params.temporal?.start_date,
-      recurrence: params.temporal?.recurrence,
+      due_date: temporalData.due_date,
+      start_date: temporalData.start_date,
+      recurrence: temporalData.recurrence,
       tags: params.tags || [],
       dependencies: params.dependencies || [],
-      reminder: params.temporal?.reminder,
+      reminder: temporalData.reminder,
     });
 
     broadcastNotification("TASK_CREATED", {
@@ -28,6 +36,7 @@ async function handleCreateTask(params) {
       priority: task.priority,
     });
 
+    // Return response with temporal data in both formats for compatibility
     return {
       success: true,
       task: {
@@ -36,6 +45,13 @@ async function handleCreateTask(params) {
         description: task.description,
         priority: task.priority,
         priority_reasoning: task.priority_reasoning,
+        // Include both nested and unnested temporal data
+        temporal: {
+          due_date: task.due_date,
+          start_date: task.start_date,
+          recurrence: task.recurrence,
+          reminder: task.reminder,
+        },
         due_date: task.due_date,
         start_date: task.start_date,
         recurrence: task.recurrence,
@@ -57,18 +73,30 @@ async function handleUpdateTask(params) {
       return { success: false, error: "Task not found" };
     }
 
-    await task.update({
+    // Extract temporal data from nested structure if present
+    const temporalData = params.temporal || {
+      due_date: params.due_date,
+      start_date: params.start_date,
+      recurrence: params.recurrence,
+      reminder: params.reminder,
+    };
+
+    // Extract update fields
+    const updateFields = {
       title: params.title,
       description: params.description || "",
-      priority: params.priority.level,
-      priority_reasoning: params.priority.reasoning,
-      due_date: params.temporal?.due_date,
-      start_date: params.temporal?.start_date,
-      recurrence: params.temporal?.recurrence,
+      priority: params.priority?.level,
+      priority_reasoning: params.priority?.reasoning,
       tags: params.tags || [],
       dependencies: params.dependencies || [],
-      reminder: params.temporal?.reminder,
-    });
+      // Use extracted temporal data
+      due_date: temporalData.due_date,
+      start_date: temporalData.start_date,
+      recurrence: temporalData.recurrence,
+      reminder: temporalData.reminder,
+    };
+
+    await task.update(updateFields);
 
     broadcastNotification("TASK_UPDATED", {
       taskId: task.id,
@@ -76,6 +104,7 @@ async function handleUpdateTask(params) {
       priority: task.priority,
     });
 
+    // Return response with temporal data in both formats for compatibility
     return {
       success: true,
       task: {
@@ -84,6 +113,13 @@ async function handleUpdateTask(params) {
         description: task.description,
         priority: task.priority,
         priority_reasoning: task.priority_reasoning,
+        // Include both nested and unnested temporal data
+        temporal: {
+          due_date: task.due_date,
+          start_date: task.start_date,
+          recurrence: task.recurrence,
+          reminder: task.reminder,
+        },
         due_date: task.due_date,
         start_date: task.start_date,
         recurrence: task.recurrence,
