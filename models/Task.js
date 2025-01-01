@@ -10,6 +10,7 @@ const Task = sequelize.define("Task", {
   title: {
     type: DataTypes.STRING,
     allowNull: false,
+    defaultValue: "New Task",
   },
   description: {
     type: DataTypes.TEXT,
@@ -18,6 +19,7 @@ const Task = sequelize.define("Task", {
   priority: {
     type: DataTypes.ENUM("Low", "Medium", "High", "Critical"),
     defaultValue: "Medium",
+    allowNull: false,
   },
   priority_reasoning: {
     type: DataTypes.TEXT,
@@ -26,6 +28,7 @@ const Task = sequelize.define("Task", {
   status: {
     type: DataTypes.ENUM("TODO", "IN_PROGRESS", "COMPLETED", "BLOCKED"),
     defaultValue: "TODO",
+    allowNull: false,
   },
   due_date: {
     type: DataTypes.DATE,
@@ -42,7 +45,6 @@ const Task = sequelize.define("Task", {
   reminder: {
     type: DataTypes.DATE,
     allowNull: true,
-    description: "Reminder time in user's timezone",
   },
   recurrence: {
     type: DataTypes.STRING,
@@ -51,23 +53,27 @@ const Task = sequelize.define("Task", {
   tags: {
     type: DataTypes.JSON,
     defaultValue: [],
+    allowNull: false,
   },
   dependencies: {
     type: DataTypes.JSON,
     defaultValue: [],
+    allowNull: false,
   },
   categories: {
     type: DataTypes.JSON,
     defaultValue: [],
-    description: "Task categories",
+    allowNull: false,
   },
   metadata: {
     type: DataTypes.JSON,
     defaultValue: {},
+    allowNull: false,
   },
   last_modified: {
     type: DataTypes.DATE,
     defaultValue: DataTypes.NOW,
+    allowNull: false,
   },
 });
 

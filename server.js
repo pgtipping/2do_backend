@@ -14,7 +14,10 @@ const {
 } = require("./models/constants");
 const sequelize = require("./config/database");
 const { Sequelize } = require("sequelize");
-const { SYSTEM_MESSAGE } = require("./llm/system-messages");
+const {
+  SYSTEM_MESSAGE,
+  CHAT_SYSTEM_MESSAGE,
+} = require("./llm/system-messages");
 const { taskFunctions } = require("./llm/functions");
 const {
   handleCreateTask,
@@ -150,32 +153,80 @@ function broadcastNotification(type, data) {
     });
 }
 
+// Function to format LLM response into conversational text
+function formatLLMResponse(response) {
+  try {
+    // If response is already a string, return it
+    if (typeof response === "string") {
+      return response;
+    }
+
+    // If it's a JSON string, parse it first
+    const parsed =
+      typeof response === "string" ? JSON.parse(response) : response;
+    const task = parsed.task || {};
+    const analysis = parsed.analysis || {};
+    const questions = parsed.clarifying_questions || [];
+
+    let conversation = [];
+
+    // Add task understanding if available
+    if (task.title) {
+      conversation.push(
+        `I understand you want to ${task.title.toLowerCase()}.`
+      );
+    }
+
+    // Add task description if available
+    if (task.description) {
+      conversation.push(`Here's what I've noted: ${task.description}`);
+    }
+
+    // Add priority reasoning if available
+    if (task.priority?.reasoning) {
+      conversation.push(task.priority.reasoning);
+    }
+
+    // Add missing information context
+    if (analysis.missing_info?.length > 0) {
+      conversation.push("\nTo help you better, I have a few questions:");
+      analysis.missing_info.forEach((q) => conversation.push(`• ${q}`));
+    }
+
+    // Add suggestions if available
+    if (analysis.suggestions?.length > 0) {
+      conversation.push("\nI have some suggestions:");
+      analysis.suggestions.forEach((s) => conversation.push(`• ${s}`));
+    }
+
+    // Add clarifying questions
+    if (questions.length > 0) {
+      if (!analysis.missing_info?.length) {
+        // Only add this line if we haven't already added questions
+        conversation.push("\nI have a few questions:");
+      }
+      questions.forEach((q) => conversation.push(`• ${q}`));
+    }
+
+    return conversation.join("\n");
+  } catch (e) {
+    // If anything fails, return the original response or a default message
+    return typeof response === "string"
+      ? response
+      : "I'm here to help with your tasks. What would you like to know?";
+  }
+}
+
 // Add task parsing endpoint
 app.post("/api/parse-task", async (req, res) => {
   console.log("=== Task Processing Started ===");
   const startTime = Date.now();
   let llmLatency = 0;
-  let error = null;
-  let parsedResponse = null;
 
   try {
     const { userInput, sessionContext = {} } = req.body;
 
-    // Validate input
-    if (!userInput || typeof userInput !== "string") {
-      console.error("Invalid input:", userInput);
-      return res.status(400).json({
-        success: false,
-        error: "Invalid input text",
-        feedback: {
-          voice:
-            "I need some text to process your request. Could you try again?",
-          display: "Please provide input text",
-        },
-      });
-    }
-
-    // Create Gemini chat
+    // Get Gemini response first
     console.log("Getting Gemini response...");
     const llmStartTime = Date.now();
 
@@ -188,119 +239,193 @@ app.post("/api/parse-task", async (req, res) => {
       ],
     });
 
-    const result = await chat.sendMessage(userInput, {
-      tools: taskFunctions,
-      toolChoice: "auto", // Let the LLM choose the appropriate function
-    });
+    const result = await chat.sendMessage(
+      `User created task: "${userInput}". Review the task and suggest helpful improvements or ask clarifying questions if needed. Remember to be helpful and conversational, not restrictive.`,
+      {
+        tools: taskFunctions,
+        toolChoice: "auto",
+      }
+    );
 
     llmLatency = Date.now() - llmStartTime;
     console.log("Gemini Response:", JSON.stringify(result, null, 2));
 
-    const candidate = result.response.candidates[0];
-    if (!candidate.content.parts[0].functionCall) {
-      throw new Error("Expected function call in response");
-    }
-
-    const functionCall = candidate.content.parts[0].functionCall;
-    console.log(`LLM chose function: ${functionCall.name}`);
-
-    // Process based on the chosen function
-    let taskResult;
-    switch (functionCall.name) {
-      case "create_task":
-        taskResult = await handleCreateTask(functionCall.args);
-        break;
-      case "identify_task":
-        taskResult = await handleIdentifyTask({
-          ...functionCall.args,
-          context: { ...functionCall.args.context, ...sessionContext },
-        });
-        break;
-      case "update_task":
-        taskResult = await handleUpdateTask(functionCall.args);
-        break;
-      default:
-        throw new Error(`Unknown function: ${functionCall.name}`);
-    }
-
-    // Send appropriate response based on the function called
-    const response = {
-      success: true,
-      function_called: functionCall.name,
-      result: taskResult,
-      feedback: {
-        voice: getFeedbackMessage(functionCall.name, taskResult),
-        display: getDisplayMessage(functionCall.name, taskResult),
-      },
-    };
-
-    // Broadcast notification if needed
-    if (["create_task", "update_task"].includes(functionCall.name)) {
-      broadcastNotification(
-        `TASK_${functionCall.name === "create_task" ? "CREATED" : "UPDATED"}`,
-        {
-          taskId: taskResult.task.id,
-          message: `Task ${
-            functionCall.name === "create_task" ? "created" : "updated"
-          }: ${taskResult.task.title}`,
-          task: taskResult.task,
-        }
-      );
-    }
-
-    res.json(response);
-  } catch (err) {
-    error = err;
-    console.error("=== Task Processing Failed ===");
-    console.error("Error details:", err);
-
-    res.status(500).json({
-      success: false,
-      error: err.message,
-      feedback: {
-        voice:
-          "I encountered an error processing your request. Please try again.",
-        display: "Error processing request",
-      },
-    });
-  } finally {
-    // Log processing attempt
-    const endTime = Date.now();
-    const totalLatency = endTime - startTime;
-
+    // Parse Gemini response
+    let parsedResponse;
     try {
-      await TaskParsingLog.create({
-        [FIELDS.INPUT]: req.body.userInput,
-        [FIELDS.ANONYMIZED_INPUT]: req.body.userInput,
-        [FIELDS.INPUT_HASH]: require("crypto")
-          .createHash("sha256")
-          .update(req.body.userInput)
-          .digest("hex"),
-        [FIELDS.PARSING_SUCCESS]: !error,
-        [FIELDS.LLM_LATENCY]: llmLatency,
-        [FIELDS.TOTAL_LATENCY]: totalLatency,
-        [FIELDS.ERROR_MESSAGE]: error ? error.message : null,
-        [FIELDS.PARSED_OUTPUT]: error
-          ? {}
-          : {
-              function_called: parsedResponse?.functionCall?.name,
-              args: parsedResponse?.functionCall?.args,
-              result: parsedResponse?.result,
-            },
-        [FIELDS.METRICS]: {
-          [METRICS_FIELDS.PROCESSING_TIME_MS]: totalLatency,
-          [METRICS_FIELDS.LLM_LATENCY_MS]: llmLatency,
-          [METRICS_FIELDS.PATTERN_MATCH_CONFIDENCE]: 1.0,
-        },
-        [FIELDS.METADATA]: {
-          [METADATA_FIELDS.LLM_MODEL]: "gemini-1.5-flash",
-          [METADATA_FIELDS.PROMPT_VERSION]: "1.0",
-          [METADATA_FIELDS.PATTERN_VERSION]: "1.0",
+      const responseText = result.response.candidates[0].content.parts[0].text;
+      // Clean up JSON markers if present
+      const cleanJson = responseText
+        .replace(/```json\n/, "")
+        .replace(/```/g, "")
+        .trim();
+      parsedResponse = JSON.parse(cleanJson);
+    } catch (parseError) {
+      console.error("Error parsing Gemini response:", parseError);
+      return res.status(500).json({
+        success: false,
+        error: "Failed to process task",
+        feedback: {
+          display: "Sorry, I couldn't process that properly. Please try again.",
+          voice: "Sorry, I couldn't process that properly. Please try again.",
         },
       });
-    } catch (logError) {
-      console.error("Failed to log processing attempt:", logError);
     }
+
+    // Create task with parsed data
+    const taskData = {
+      title:
+        typeof parsedResponse.task.title === "string"
+          ? parsedResponse.task.title
+          : userInput,
+      description: parsedResponse.task.description || "",
+      priority: parsedResponse.task.priority?.level || "Medium",
+      priority_reasoning: parsedResponse.task.priority?.reasoning || "",
+      status: "TODO",
+      metadata: {},
+      tags: parsedResponse.task.tags || [],
+      categories: [],
+      dependencies: parsedResponse.task.dependencies || [],
+      due_date: parsedResponse.task.temporal?.due_date || null,
+      start_date: parsedResponse.task.temporal?.start_date || null,
+      recurrence: parsedResponse.task.temporal?.recurrence || null,
+      reminder: parsedResponse.task.temporal?.reminder || null,
+    };
+
+    // Create the task
+    let createdTask;
+    try {
+      createdTask = await Task.create(taskData);
+      console.log("Task created:", createdTask.id);
+    } catch (createError) {
+      console.error("Error creating task:", createError);
+      return res.status(500).json({
+        success: false,
+        error: "Failed to create task",
+        feedback: {
+          display: "Sorry, I couldn't create the task. Please try again.",
+          voice: "Sorry, I couldn't create the task. Please try again.",
+        },
+      });
+    }
+
+    // Format conversation response
+    const formattedMessage = formatLLMResponse(parsedResponse);
+
+    // Return success response
+    return res.json({
+      success: true,
+      task: createdTask,
+      llm_response: {
+        message: formattedMessage,
+        function_call:
+          result.response.candidates[0].content.parts[0].functionCall || null,
+      },
+      feedback: {
+        display: "Task created successfully",
+        voice: "I've created your task. " + formattedMessage,
+      },
+    });
+  } catch (error) {
+    console.error("=== Task Creation Failed ===");
+    console.error("Error details:", error);
+    return res.status(500).json({
+      success: false,
+      error: "Failed to create task",
+      feedback: {
+        display: "Sorry, I couldn't create the task. Please try again.",
+        voice: "Sorry, I couldn't create the task. Please try again.",
+      },
+    });
+  }
+});
+
+// Add chat endpoint for non-task conversations
+app.post("/api/chat", async (req, res) => {
+  console.log("=== Chat Processing Started ===");
+  const startTime = Date.now();
+  let llmLatency = 0;
+
+  try {
+    const { userInput, sessionContext = {} } = req.body;
+
+    // Get Gemini response
+    console.log("Getting Gemini response...");
+    const llmStartTime = Date.now();
+
+    const chat = model.startChat({
+      history: [
+        {
+          role: "user",
+          parts: [{ text: CHAT_SYSTEM_MESSAGE }],
+        },
+      ],
+    });
+
+    const result = await chat.sendMessage(
+      `User message: "${userInput}". Remember to be conversational and natural.`,
+      {
+        tools: taskFunctions,
+        toolChoice: "auto",
+      }
+    );
+
+    llmLatency = Date.now() - llmStartTime;
+    console.log("Gemini Response:", JSON.stringify(result, null, 2));
+
+    // Get the response text and use it directly
+    const responseText = result.response.candidates[0].content.parts[0].text;
+    const functionCall =
+      result.response.candidates[0].content.parts[0].functionCall;
+
+    // Handle function calls if present
+    let functionResult = null;
+    if (functionCall) {
+      try {
+        switch (functionCall.name) {
+          case "create_task":
+            functionResult = await handleCreateTask(functionCall.args);
+            break;
+          case "update_task":
+            functionResult = await handleUpdateTask(functionCall.args);
+            break;
+          case "analyze_task_context":
+            functionResult = await handleAnalyzeTaskContext(functionCall.args);
+            break;
+          default:
+            console.log("Unknown function call:", functionCall.name);
+        }
+      } catch (error) {
+        console.error("Error executing function call:", error);
+      }
+    }
+
+    // Return success response
+    return res.json({
+      success: true,
+      llm_response: {
+        message: responseText,
+        function_call: functionCall,
+        function_result: functionResult,
+      },
+      feedback: {
+        display: functionResult
+          ? getFeedbackMessage(functionCall?.name, functionResult)
+          : "Message processed",
+        voice: responseText,
+      },
+    });
+  } catch (error) {
+    console.error("=== Chat Processing Failed ===");
+    console.error("Error details:", error);
+    return res.status(500).json({
+      success: false,
+      error: "Failed to process message",
+      feedback: {
+        display: "Sorry, I couldn't process your message. Please try again.",
+        voice: "Sorry, I couldn't process your message. Please try again.",
+      },
+    });
   }
 });
 

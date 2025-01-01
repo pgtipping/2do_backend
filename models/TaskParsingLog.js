@@ -73,15 +73,6 @@ TaskParsingLog.init(
       type: DataTypes.JSONB,
       allowNull: false,
       defaultValue: {},
-      validate: {
-        hasRequiredFields(value) {
-          if (!value.task || !value.temporal) {
-            throw new Error(
-              "parsed_output must contain task and temporal objects"
-            );
-          }
-        },
-      },
     },
 
     timestamp: {
@@ -103,15 +94,6 @@ TaskParsingLog.init(
     [FIELDS.METRICS]: {
       type: DataTypes.JSONB,
       defaultValue: {},
-      validate: {
-        hasRequiredMetrics(value) {
-          const required = Object.values(METRICS_FIELDS);
-          const missing = required.filter((field) => !(field in value));
-          if (missing.length > 0) {
-            throw new Error(`Missing required metrics: ${missing.join(", ")}`);
-          }
-        },
-      },
     },
 
     [FIELDS.METADATA]: {
@@ -119,16 +101,13 @@ TaskParsingLog.init(
       defaultValue: {},
       validate: {
         hasRequiredMetadata(value) {
-          const required = Object.values(METADATA_FIELDS);
-          const validModels = ["gemini-1.5-flash"];
-          const missing = required.filter((field) => !(field in value));
-          if (missing.length > 0) {
-            throw new Error(`Missing required metadata: ${missing.join(", ")}`);
-          }
-          if (!validModels.includes(value[METADATA_FIELDS.LLM_MODEL])) {
-            throw new Error(
-              `Invalid LLM model: ${value[METADATA_FIELDS.LLM_MODEL]}`
-            );
+          if (value[METADATA_FIELDS.LLM_MODEL]) {
+            const validModels = ["gemini-1.5-flash"];
+            if (!validModels.includes(value[METADATA_FIELDS.LLM_MODEL])) {
+              throw new Error(
+                `Invalid LLM model: ${value[METADATA_FIELDS.LLM_MODEL]}`
+              );
+            }
           }
         },
       },

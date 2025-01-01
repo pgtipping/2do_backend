@@ -30,13 +30,16 @@ async function handleCreateTask(params) {
       reminder: temporalData.reminder,
     });
 
+    // Get task insights for more natural conversation
+    const taskInsights = await generateTaskInsights(task);
+
     broadcastNotification("TASK_CREATED", {
       taskId: task.id,
       message: `New task created: ${task.title}`,
       priority: task.priority,
     });
 
-    // Return response with temporal data in both formats for compatibility
+    // Return response with temporal data and insights
     return {
       success: true,
       task: {
@@ -45,7 +48,6 @@ async function handleCreateTask(params) {
         description: task.description,
         priority: task.priority,
         priority_reasoning: task.priority_reasoning,
-        // Include both nested and unnested temporal data
         temporal: {
           due_date: task.due_date,
           start_date: task.start_date,
@@ -59,11 +61,137 @@ async function handleCreateTask(params) {
         dependencies: task.dependencies,
         reminder: task.reminder,
       },
+      analysis: {
+        insights: taskInsights,
+        missing_info: identifyMissingInformation(task),
+        suggestions: generateTaskSuggestions(task),
+      },
     };
   } catch (error) {
     console.error("Error creating task:", error);
     return { success: false, error: error.message };
   }
+}
+
+async function generateTaskInsights(task) {
+  const insights = [];
+
+  // Get user's task patterns
+  const commonTimes = await getCommonTaskTimes();
+  const preferredDays = await getPreferredDays();
+  const categoryDistribution = await getCategoryDistribution();
+
+  // Add timing insights
+  if (task.due_date) {
+    const taskTime = new Date(task.due_date).getHours();
+    const commonTimeForCategory = commonTimes[task.category];
+    if (commonTimeForCategory && taskTime !== commonTimeForCategory) {
+      insights.push(
+        `You usually do ${task.category} tasks around ${formatTime(
+          commonTimeForCategory
+        )}. Would you like to adjust the time?`
+      );
+    }
+  }
+
+  // Add day preference insights
+  if (task.due_date) {
+    const taskDay = new Date(task.due_date).getDay();
+    const preferredDay = preferredDays[task.category];
+    if (preferredDay && taskDay !== preferredDay) {
+      insights.push(
+        `I notice you often complete ${task.category} tasks on ${formatDay(
+          preferredDay
+        )}s. Would you like to consider that instead?`
+      );
+    }
+  }
+
+  // Add category insights
+  const similarTasks = await findRelatedTasks([task], task.title);
+  if (similarTasks.length > 0) {
+    insights.push(
+      `I found ${similarTasks.length} similar tasks in your history. Would you like me to show you how you handled them?`
+    );
+  }
+
+  return insights;
+}
+
+function identifyMissingInformation(task) {
+  const missing = [];
+
+  // Check for essential task details
+  if (!task.description) {
+    missing.push("Could you provide more details about this task?");
+  }
+
+  if (!task.due_date) {
+    missing.push("When would you like to complete this task?");
+  }
+
+  if (!task.priority) {
+    missing.push("How important is this task to you?");
+  }
+
+  // Check for task context
+  if (!task.tags || task.tags.length === 0) {
+    missing.push("Would you like to add any tags to help organize this task?");
+  }
+
+  return missing;
+}
+
+function generateTaskSuggestions(task) {
+  const suggestions = [];
+
+  // Suggest breaking down large tasks
+  if (task.description && task.description.length > 200) {
+    suggestions.push(
+      "This seems like a complex task. Would you like me to help break it down into smaller subtasks?"
+    );
+  }
+
+  // Suggest reminders for important tasks
+  if (task.priority === "high" && !task.reminder) {
+    suggestions.push(
+      "This is a high-priority task. Would you like me to set up a reminder?"
+    );
+  }
+
+  // Suggest recurrence for routine-like tasks
+  const routineKeywords = ["weekly", "daily", "monthly", "routine", "regular"];
+  if (
+    routineKeywords.some((keyword) =>
+      task.title.toLowerCase().includes(keyword)
+    ) &&
+    !task.recurrence
+  ) {
+    suggestions.push(
+      "This sounds like a recurring task. Would you like to set up a schedule for it?"
+    );
+  }
+
+  return suggestions;
+}
+
+function formatTime(hour) {
+  return new Date(2000, 0, 1, hour).toLocaleTimeString([], {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function formatDay(day) {
+  return [
+    "Sunday",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+  ][day];
 }
 
 async function handleUpdateTask(params) {
