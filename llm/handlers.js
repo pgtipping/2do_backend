@@ -217,6 +217,7 @@ async function handleUpdateTask(params) {
       priority_reasoning: params.priority?.reasoning,
       tags: params.tags || [],
       dependencies: params.dependencies || [],
+      status: params.status,
       // Use extracted temporal data
       due_date: temporalData.due_date,
       start_date: temporalData.start_date,

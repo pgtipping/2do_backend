@@ -2,11 +2,11 @@
  * Notification types and their handlers
  */
 const notificationTypes = {
-  TASK_CREATED: "task_created",
-  TASK_UPDATED: "task_updated",
-  TASK_DELETED: "task_deleted",
-  PRIORITY_CHANGED: "priority_changed",
-  DEADLINE_APPROACHING: "deadline_approaching",
+  TASK_CREATED: "TASK_CREATED",
+  TASK_UPDATED: "TASK_UPDATED",
+  TASK_DELETED: "TASK_DELETED",
+  PRIORITY_CHANGED: "PRIORITY_CHANGED",
+  DEADLINE_APPROACHING: "DEADLINE_APPROACHING",
 };
 
 // Store active notification subscribers
@@ -28,14 +28,12 @@ function subscribeToNotifications(callback) {
  * @param {Object} data - Notification data
  */
 function broadcastNotification(type, data) {
+  console.log("Broadcasting notification:", { type, data });
   const notification = {
     type,
     data,
     timestamp: new Date().toISOString(),
   };
-
-  // Log notification for debugging
-  console.log(`Broadcasting notification: ${type}`, data);
 
   // Notify all subscribers
   subscribers.forEach((callback) => {

@@ -25,6 +25,7 @@ const {
   handleAnalyzeTaskContext,
 } = require("./llm/handlers");
 const Task = require("./models/Task");
+const Notification = require("./models/Notification");
 
 // Load environment variables
 dotenv.config();
@@ -217,124 +218,82 @@ function formatLLMResponse(response) {
   }
 }
 
-// Add task parsing endpoint
+// Task parsing endpoint
 app.post("/api/parse-task", async (req, res) => {
-  console.log("=== Task Processing Started ===");
-  const startTime = Date.now();
-  let llmLatency = 0;
-
   try {
-    const { userInput, sessionContext = {} } = req.body;
-
-    // Get Gemini response first
-    console.log("Getting Gemini response...");
-    const llmStartTime = Date.now();
-
-    const chat = model.startChat({
-      history: [
-        {
-          role: "user",
-          parts: [{ text: SYSTEM_MESSAGE }],
-        },
-      ],
-    });
-
-    const result = await chat.sendMessage(
-      `User created task: "${userInput}". Review the task and suggest helpful improvements or ask clarifying questions if needed. Remember to be helpful and conversational, not restrictive.`,
-      {
-        tools: taskFunctions,
-        toolChoice: "auto",
-      }
-    );
-
-    llmLatency = Date.now() - llmStartTime;
-    console.log("Gemini Response:", JSON.stringify(result, null, 2));
-
-    // Parse Gemini response
-    let parsedResponse;
-    try {
-      const responseText = result.response.candidates[0].content.parts[0].text;
-      // Clean up JSON markers if present
-      const cleanJson = responseText
-        .replace(/```json\n/, "")
-        .replace(/```/g, "")
-        .trim();
-      parsedResponse = JSON.parse(cleanJson);
-    } catch (parseError) {
-      console.error("Error parsing Gemini response:", parseError);
-      return res.status(500).json({
+    const userInput = req.body.input;
+    if (!userInput) {
+      return res.status(400).json({
         success: false,
-        error: "Failed to process task",
+        error: "Input text is required",
         feedback: {
-          display: "Sorry, I couldn't process that properly. Please try again.",
-          voice: "Sorry, I couldn't process that properly. Please try again.",
+          display: "Please provide some text to create a task",
+          voice: "Please provide some text to create a task",
         },
       });
     }
 
-    // Create task with parsed data
+    // LLM processing
+    const result = await callVertexAI(userInput);
+    if (!result.success) {
+      return res.status(500).json({
+        success: false,
+        error: "Failed to process input",
+        feedback: {
+          display: "Sorry, I couldn't understand that. Please try again.",
+          voice: "Sorry, I couldn't understand that. Please try again.",
+        },
+      });
+    }
+
+    const parsedResponse = result.response;
+    if (!parsedResponse || !parsedResponse.task) {
+      return res.status(500).json({
+        success: false,
+        error: "Invalid response format",
+        feedback: {
+          display: "Sorry, I couldn't process that. Please try again.",
+          voice: "Sorry, I couldn't process that. Please try again.",
+        },
+      });
+    }
+
+    // Use the same defaults as direct creation
     const taskData = {
-      title:
-        typeof parsedResponse.task.title === "string"
-          ? parsedResponse.task.title
-          : userInput,
+      title: parsedResponse.task.title || userInput,
       description: parsedResponse.task.description || "",
       priority: parsedResponse.task.priority?.level || "Medium",
       priority_reasoning: parsedResponse.task.priority?.reasoning || "",
-      status: "TODO",
-      metadata: {},
-      tags: parsedResponse.task.tags || [],
-      categories: [],
-      dependencies: parsedResponse.task.dependencies || [],
+      status: "PENDING",
       due_date: parsedResponse.task.temporal?.due_date || null,
       start_date: parsedResponse.task.temporal?.start_date || null,
       recurrence: parsedResponse.task.temporal?.recurrence || null,
       reminder: parsedResponse.task.temporal?.reminder || null,
+      tags: parsedResponse.task.tags || [],
+      categories: parsedResponse.task.categories || [],
+      dependencies: parsedResponse.task.dependencies || [],
+      metadata: parsedResponse.task.metadata || {},
     };
 
-    // Create the task
-    let createdTask;
-    try {
-      createdTask = await Task.create(taskData);
-      console.log("Task created:", createdTask.id);
-    } catch (createError) {
-      console.error("Error creating task:", createError);
-      return res.status(500).json({
-        success: false,
-        error: "Failed to create task",
-        feedback: {
-          display: "Sorry, I couldn't create the task. Please try again.",
-          voice: "Sorry, I couldn't create the task. Please try again.",
-        },
-      });
-    }
-
-    // Format conversation response
-    const formattedMessage = formatLLMResponse(parsedResponse);
-
-    // Return success response
+    // Return processed data without creating task
     return res.json({
       success: true,
-      task: createdTask,
+      task: taskData,
       llm_response: {
-        message: formattedMessage,
+        message: formatLLMResponse(parsedResponse),
         function_call:
           result.response.candidates[0].content.parts[0].functionCall || null,
       },
-      feedback: {
-        display: "Task created successfully",
-        voice: "I've created your task. " + formattedMessage,
-      },
     });
   } catch (error) {
-    console.error("=== Task Creation Failed ===");
+    console.error("=== Task Parsing Failed ===");
     console.error("Error details:", error);
     return res.status(500).json({
       success: false,
-      error: "Failed to create task",
+      error: "Failed to parse task",
       feedback: {
-        display: "Sorry, I couldn't create the task. Please try again.",
-        voice: "Sorry, I couldn't create the task. Please try again.",
+        display: "Sorry, I couldn't process that. Please try again.",
+        voice: "Sorry, I couldn't process that. Please try again.",
       },
     });
   }
@@ -520,27 +479,194 @@ app.get("/api/tasks", async (req, res) => {
   }
 });
 
+// Task creation endpoint - handles both direct and LLM modes
 app.post("/api/tasks", async (req, res) => {
   try {
-    const task = await Task.create(req.body);
-    res.status(201).json(task);
+    const useLLM = req.query.useLLM === "true";
+    let taskData = req.body;
+
+    // Validate input data
+    if (useLLM) {
+      if (!taskData.input || typeof taskData.input !== "string") {
+        return res.status(400).json({
+          success: false,
+          error: "Input text is required for LLM processing",
+        });
+      }
+
+      // LLM processing
+      const response = await fetch("http://localhost:5000/api/parse-task", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ input: taskData.input }),
+      });
+
+      if (!response.ok) {
+        throw new Error("LLM processing failed");
+      }
+
+      const llmResult = await response.json();
+      if (!llmResult.success) {
+        throw new Error(llmResult.error || "LLM processing failed");
+      }
+      taskData = llmResult.task;
+    } else {
+      // Direct task creation - validate title
+      if (!taskData.title || typeof taskData.title !== "string") {
+        return res.status(400).json({
+          success: false,
+          error: "Task title must be a non-empty string",
+        });
+      }
+
+      // For direct creation, use simple defaults
+      taskData = {
+        title: taskData.title.trim(),
+        description: "",
+        priority: "Medium",
+        status: "PENDING",
+        categories: [],
+        metadata: {},
+      };
+    }
+
+    // Create task with provided or processed data
+    const task = await Task.create({
+      title: taskData.title,
+      description: taskData.description || "",
+      priority: taskData.priority || "Medium",
+      due_date: taskData.due_date || null,
+      start_date: taskData.start_date || null,
+      recurrence: taskData.recurrence || null,
+      tags: taskData.tags || [],
+      dependencies: taskData.dependencies || [],
+      reminder: taskData.reminder || null,
+      status: taskData.status || "PENDING",
+      categories: taskData.categories || [],
+      metadata: taskData.metadata || {},
+    });
+
+    // Create notification in database
+    const notification = await Notification.create({
+      type: "TASK_CREATED",
+      message: `Task created: ${task.title}`,
+      data: {
+        taskId: task.id,
+        task: task.toJSON(),
+      },
+      isRead: false,
+    });
+
+    // Broadcast notification
+    broadcastNotification("TASK_CREATED", {
+      taskId: task.id,
+      task: task.toJSON(),
+      message: useLLM ? "Task created with AI assistance" : "Task created",
+      priority: "normal",
+      feedback: {
+        display: useLLM ? "Task created with AI assistance" : "Task created",
+        voice: useLLM
+          ? "I've created your task with AI assistance"
+          : "Task created",
+      },
+    });
+
+    return res.status(201).json({
+      success: true,
+      task: task,
+      feedback: {
+        display: useLLM ? "Task created with AI assistance" : "Task created",
+        voice: useLLM
+          ? "I've created your task with AI assistance"
+          : "Task created",
+      },
+      ...(useLLM && { llm_response: llmResult.llm_response }), // Include LLM response if available
+    });
   } catch (error) {
     console.error("Error creating task:", error);
-    res.status(500).json({ error: "Failed to create task" });
+    const errorMessage =
+      error.message === "Database connection failed"
+        ? "Unable to reach database"
+        : "Unable to save task";
+
+    return res.status(500).json({
+      success: false,
+      error: errorMessage,
+      feedback: {
+        display: errorMessage,
+        voice: errorMessage,
+      },
+    });
   }
 });
 
+// Task update endpoint - handles both direct and LLM modes
 app.put("/api/tasks/:id", async (req, res) => {
   try {
-    const task = await Task.findByPk(req.params.id);
+    const taskId = req.params.id;
+    const useLLM = req.query.useLLM === "true";
+    let updates = req.body;
+
+    const task = await Task.findByPk(taskId);
     if (!task) {
-      return res.status(404).json({ error: "Task not found" });
+      return res.status(404).json({
+        success: false,
+        error: "Task not found",
+      });
     }
-    await task.update(req.body);
-    res.json(task);
+
+    if (useLLM) {
+      // Existing LLM processing logic
+      const response = await fetch("/api/parse-task", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ input: updates.input, taskId }),
+      });
+      const llmResult = await response.json();
+      if (!llmResult.success) {
+        throw new Error(llmResult.error || "LLM processing failed");
+      }
+      updates = llmResult.task;
+    }
+
+    // Update task with provided or processed data
+    await task.update({
+      title: updates.title,
+      description: updates.description,
+      priority: updates.priority,
+      due_date: updates.due_date,
+      start_date: updates.start_date,
+      recurrence: updates.recurrence,
+      tags: updates.tags,
+      dependencies: updates.dependencies,
+      reminder: updates.reminder,
+      status: updates.status,
+    });
+
+    // Broadcast notification
+    broadcastNotification("task_updated", {
+      task: task.toJSON(),
+      message: "Task updated successfully",
+    });
+
+    return res.json({
+      success: true,
+      task: task,
+      feedback: {
+        display: "Task updated successfully",
+        voice: "Task updated successfully",
+      },
+    });
   } catch (error) {
     console.error("Error updating task:", error);
-    res.status(500).json({ error: "Failed to update task" });
+    return res.status(500).json({
+      success: false,
+      error: "Failed to update task",
+      feedback: {
+        display: "Failed to update task. Please try again.",
+        voice: "Failed to update task. Please try again.",
+      },
+    });
   }
 });
 
